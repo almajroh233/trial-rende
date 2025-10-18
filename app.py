@@ -10,10 +10,25 @@ import time
 import shutil
 from urllib.parse import quote, unquote
 
+# -------------------------------------------------------------------
+# Ensure ffmpeg exists – install it on Railway if it's missing
+# -------------------------------------------------------------------
+if not shutil.which("ffmpeg"):
+    print("⚡ Installing ffmpeg ...")
+    try:
+        subprocess.run(["apt-get", "update", "-y"], check=True)
+        subprocess.run(["apt-get", "install", "-y", "ffmpeg"], check=True)
+        print("✅ ffmpeg installed successfully")
+    except Exception as e:
+        print(f"Error installing ffmpeg: {e}")
+        sys.exit(1)
+else:
+    print("✅ ffmpeg already installed")
+
 # -----------------------------
 # Auto-install missing packages
 # -----------------------------
-required_packages = ["flask", "yt-dlp", "requests", "pcloud"]
+required_packages = ["flask", "yt-dlp", "requests"]
 try:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for package in required_packages:
@@ -26,12 +41,30 @@ except Exception as e:
     print(f"Error installing packages: {e}")
     sys.exit(1)
 
-from flask import Flask, render_template_string, request, send_from_directory, flash, url_for, Response, redirect, session, jsonify
+from flask import Flask, render_template_string, request, send_from_directory, flash, url_for, Response, redirect, session
 from werkzeug.utils import secure_filename
 import requests
 import yt_dlp
-from pcloud import PyCloud
+import os
 
+app = Flask(__name__)
+app.secret_key = "a_very_secret_key_for_flask"
+
+# -----------------------------
+# Simple one-password protection
+# -----------------------------
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "1234")  # change default if you want
+
+@app.before_request
+def require_password():
+    print("🛡️ checking password")  # debug print
+    auth = request.authorization
+    if not auth or auth.username != "admin" or auth.password != APP_PASSWORD:
+        return Response(
+            "Authentication required",
+            401,
+            {"WWW-Authenticate": 'Basic realm="Login Required"'}
+        )
 # -----------------------------
 # Configuration
 # -----------------------------
@@ -40,22 +73,13 @@ DOWNLOAD_FOLDER = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 COOKIES_FILE = os.path.join(os.getcwd(), "youtube_cookies.txt")
-PIXELDRAIN_API_KEY = "eb6f7009-6a28-41ef-bbd3-a17f37d026c1"  # Replace with your key if you have one
-
-# pCloud Configuration
-PCLOUD_EMAIL = "moh.aziz.8890@gmail.com"
-PCLOUD_PASSWORD = "Oga123456?!" # Note: Storing passwords in code is not secure for production
-PCLOUD_FOLDER = "downloader"
-PCLOUD_TOKEN_FILE = os.path.join(os.getcwd(), "pcloud_token.json") # Token file for auth
-
+PIXELDRAIN_API_KEY = os.environ.get("PIXELDRAIN_API_KEY", "")  # Replace with your key if you have one
 print(f"📂 Downloads folder: {os.path.abspath(DOWNLOAD_FOLDER)}")
 print(f"🍪 Cookies file: {'Exists' if os.path.exists(COOKIES_FILE) else 'Not found'}")
 
 # -----------------------------
 # Flask & SSE Setup
 # -----------------------------
-app = Flask(__name__)
-app.secret_key = "a_very_secret_key_for_flask"
 progress_queue = queue.Queue()
 
 # -----------------------------
@@ -80,8 +104,6 @@ TEMPLATE = """
         button.delete:hover { background-color: #c82333; }
         button.upload { background-color: #17a2b8; }
         button.upload:hover { background-color: #138496; }
-        button.pcloud { background-color: #8E44AD; }
-        button.pcloud:hover { background-color: #732d91; }
         button.encode { background-color: #28a745; }
         button.encode:hover { background-color: #218838; }
         button.rename { background-color: #ffc107; color: #212529; }
@@ -107,7 +129,7 @@ TEMPLATE = """
 <body>
 <div class="container">
     <h1>Video Downloader & Uploader</h1>
-    <p>Powered by yt-dlp, FFmpeg, Pixeldrain & pCloud</p>
+    <p>Powered by yt-dlp, FFmpeg & Pixeldrain</p>
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -123,34 +145,6 @@ TEMPLATE = """
         </div>
         <pre id="progress-log"></pre>
     </div>
-
-    <!-- MANUAL MERGE SECTION -->
-    <hr>
-    <h2>Manual Format Merge</h2>
-    <p>Fetch formats from a URL, then manually provide the Video and Audio IDs to merge into an MKV file.</p>
-    <form method="POST" action="{{ url_for('index') }}">
-        <label>Page URL:</label><br>
-        <input type="text" name="manual_url" size="80" value="{{ manual_url }}" required><br>
-        <button type="submit" name="action" value="manual_fetch">Fetch Formats</button><br><br>
-
-        {% if manual_formats_raw %}
-            <input type="hidden" name="manual_url" value="{{ manual_url }}">
-            <h3>Available Formats (Raw):</h3>
-            <pre>{{ manual_formats_raw }}</pre>
-
-            <label>Video ID:</label><br>
-            <input type="text" name="manual_video_id" required placeholder="Enter the ID of the video stream"><br>
-
-            <label>Audio ID (optional):</label><br>
-            <input type="text" name="manual_audio_id" placeholder="Enter ID of audio stream (leave blank for video-only)"><br>
-            
-            <label>Filename (will be saved as .mkv):</label><br>
-            <input type="text" name="manual_filename" value="{{ manual_filename }}" required><br><br>
-            
-            <button type="submit" name="action" value="manual_merge">Merge & Download</button>
-        {% endif %}
-    </form>
-    <hr>
 
     <h2>Advanced Download</h2>
     <form method="POST" action="{{ url_for('index') }}" id="download-form" onsubmit="return validateForm()">
@@ -295,8 +289,7 @@ TEMPLATE = """
                 document.addEventListener('DOMContentLoaded', updatePresetOptions);
             </script>
             <br>
-            <label><input type="checkbox" name="upload_pixeldrain" value="true"> Upload to Pixeldrain after completion</label><br>
-            <label><input type="checkbox" name="upload_pcloud" value="true"> Upload to pCloud after completion</label><br><br>
+            <label><input type="checkbox" name="upload_pixeldrain" value="true"> Upload to Pixeldrain after completion</label><br><br>
             <button type="submit" name="action" value="download">Download & Convert</button>
             <h3>Available Formats (Raw):</h3>
             <pre>{{ formats }}</pre>
@@ -310,19 +303,17 @@ TEMPLATE = """
         <label>URL (Video, Playlist, or any direct file):</label><br>
         <input type="text" name="direct_url" size="80" required><br>
         <label><input type="checkbox" name="upload_pixeldrain_direct" value="true"> Upload to Pixeldrain after download</label><br>
-        <label><input type="checkbox" name="upload_pcloud_direct" value="true"> Upload to pCloud after download</label><br>
         <button type="submit" name="action" value="direct_download">Download to Server</button>
         <button type="submit" name="action" value="direct_upload_pixeldrain" class="upload">Upload to Pixeldrain</button>
-        <button type="submit" name="action" value="direct_upload_pcloud" class="pcloud">Upload to pCloud</button>
     </form>
 
     <hr>
 
-    <h2>Upload File</h2>
+    <h2>Upload File to Pixeldrain</h2>
     <form method="POST" action="{{ url_for('upload_direct') }}" enctype="multipart/form-data">
-        <label>Select a file from your computer to upload to Pixeldrain:</label><br>
+        <label>Select a file from your computer:</label><br>
         <input type="file" name="file" required><br>
-        <button type="submit" class="upload">Upload to Pixeldrain</button>
+        <button type="submit" class="upload">Upload Directly</button>
     </form>
 
     <hr>
@@ -360,6 +351,7 @@ TEMPLATE = """
                 try {
                     const data = JSON.parse(event.data);
                     
+                    // Store the final URL if the server sends it
                     if (data.final_url) {
                         finalUrl = data.final_url;
                     }
@@ -371,12 +363,9 @@ TEMPLATE = """
                         log.innerHTML += "\\n\\nOperation finished. Redirecting...";
                         
                         let redirectTarget = "{{ url_for('list_files') }}";
+                        // If we have a final URL, redirect to a special endpoint to set the session flash message
                         if (finalUrl) {
                             redirectTarget = "{{ url_for('operation_complete') }}?url=" + encodeURIComponent(finalUrl);
-                        } else if (data.pcloud_success) {
-                             redirectTarget = "{{ url_for('operation_complete') }}?pcloud_success=true";
-                        } else if (data.pcloud_action) {
-                             redirectTarget = "{{ url_for('pcloud_files') }}";
                         }
                         
                         setTimeout(() => { window.location.href = redirectTarget; }, 2000);
@@ -465,7 +454,6 @@ ENCODE_TEMPLATE = """
     </div>
 
     <form method="POST" onsubmit="return validateEncodeForm()">
-        <input type="hidden" name="pcloud_path" value="{{ pcloud_path }}">
         <label>Output Filename (relative to downloads folder):</label><br>
         <input type="text" name="output_filename" value="{{ suggested_output }}" required><br>
         
@@ -589,8 +577,7 @@ ENCODE_TEMPLATE = """
         </script>
         
         <br>
-        <label><input type="checkbox" name="upload_pixeldrain" value="true"> Upload to Pixeldrain after completion</label><br>
-        <label><input type="checkbox" name="upload_pcloud" value="true"> Upload to pCloud after completion</label><br><br>
+        <label><input type="checkbox" name="upload_pixeldrain" value="true"> Upload to Pixeldrain after completion</label><br><br>
         <button type="submit">Start Encoding</button>
         <a href="{{ url_for('list_files') }}">Back to Files</a>
     </form>
@@ -626,8 +613,6 @@ ENCODE_TEMPLATE = """
                         let redirectTarget = "{{ url_for('list_files') }}";
                         if (finalUrl) {
                             redirectTarget = "{{ url_for('operation_complete') }}?url=" + encodeURIComponent(finalUrl);
-                        } else if (data.pcloud_success) {
-                             redirectTarget = "{{ url_for('operation_complete') }}?pcloud_success=true";
                         }
                         
                         setTimeout(() => { window.location.href = redirectTarget; }, 2000);
@@ -727,10 +712,6 @@ FILE_OPERATION_TEMPLATE = """
                         let redirectTarget = "{{ url_for('list_files') }}";
                         if (finalUrl) {
                             redirectTarget = "{{ url_for('operation_complete') }}?url=" + encodeURIComponent(finalUrl);
-                        } else if (data.pcloud_success) {
-                             redirectTarget = "{{ url_for('operation_complete') }}?pcloud_success=true";
-                        } else if (data.pcloud_action_success) {
-                             redirectTarget = "{{ url_for('pcloud_files') }}?feedback=" + encodeURIComponent(data.pcloud_action_success);
                         }
                         
                         setTimeout(() => { window.location.href = redirectTarget; }, 2000);
@@ -776,47 +757,6 @@ FILE_OPERATION_TEMPLATE = """
 # -----------------------------
 # Helper Functions
 # -----------------------------
-def get_pcloud_client():
-    """
-    Authenticates with pCloud using a stored token, or password if no token exists.
-    Saves the new token upon successful password authentication.
-    """
-    access_token = None
-    if os.path.exists(PCLOUD_TOKEN_FILE):
-        try:
-            with open(PCLOUD_TOKEN_FILE, 'r') as f:
-                token_data = json.load(f)
-                access_token = token_data.get('access_token')
-                print("💡 Found pCloud access token file.")
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"⚠️ Could not read pCloud token file: {e}")
-            access_token = None
-
-    if access_token:
-        try:
-            pc = PyCloud(access_token=access_token)
-            pc.userinfo()
-            print("✅ Successfully authenticated with pCloud token.")
-            return pc
-        except Exception as e:
-            print(f"⚠️ pCloud token is invalid or expired: {e}. Re-authenticating with password.")
-            if os.path.exists(PCLOUD_TOKEN_FILE): os.remove(PCLOUD_TOKEN_FILE)
-
-    print("🔑 Authenticating with pCloud email and password...")
-    try:
-        pc = PyCloud(PCLOUD_EMAIL, PCLOUD_PASSWORD)
-        new_token = getattr(pc, 'token', None) or getattr(pc, 'auth', {}).get('auth')
-        if new_token:
-            with open(PCLOUD_TOKEN_FILE, 'w') as f:
-                json.dump({'access_token': new_token}, f)
-            print(f"💾 Saved new pCloud token to {PCLOUD_TOKEN_FILE}")
-        else:
-            print("⚠️ Warning: Could not extract token from pCloud client — continuing without saving.")
-        return pc
-    except Exception as e:
-        print(f"❌ CRITICAL: pCloud password authentication failed: {e}")
-        raise e
-
 def human_size(size_bytes):
     if size_bytes is None or size_bytes == 0:
         return "0 B"
@@ -830,218 +770,281 @@ def human_size(size_bytes):
 
 def get_safe_filename(name):
     """Sanitizes a string to be a valid filename component, allowing slashes for paths."""
+    # Split the path and sanitize each component
     parts = name.split('/')
     safe_parts = [re.sub(r'[\\*?:"<>|]', "_", part) for part in parts]
     safe_parts = [re.sub(r'\s+', ' ', part).strip() for part in safe_parts]
     return '/'.join(safe_parts)
 
 def get_file_size(file_path):
+    """Returns human-readable file size."""
     try:
-        return human_size(os.path.getsize(file_path))
+        size_bytes = os.path.getsize(file_path)
+        return human_size(size_bytes)
     except FileNotFoundError:
         return "N/A"
 
 def is_media_file(file_path):
+    """Check if file is a video or audio file based on extension."""
     video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.mpg', '.mpeg', '.ts', '.vob'}
     audio_extensions = {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a', '.opus'}
-    ext = os.path.splitext(os.path.basename(file_path))[1].lower()
+    ext = os.path.splitext(file_path)[1].lower()
     return ext in video_extensions or ext in audio_extensions
 
-def get_media_info(file_path):
-    """Fetches media information using ffprobe."""
-    try:
-        command = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", "-show_format", file_path
-        ]
-        result = subprocess.check_output(command, stderr=subprocess.STDOUT)
-        data = json.loads(result)
-        
-        info = {}
-        
-        video_stream = next((s for s in data.get('streams', []) if s.get('codec_type') == 'video'), None)
-        audio_stream = next((s for s in data.get('streams', []) if s.get('codec_type') == 'audio'), None)
-
-        if video_stream:
-            info['video_codec'] = video_stream.get('codec_name', 'N/A')
-            fr_str = video_stream.get('avg_frame_rate', '0/1')
-            if '/' in fr_str and fr_str != '0/1':
-                num, den = map(int, fr_str.split('/'))
-                info['video_fps'] = f"{num / den:.2f}" if den else '0.00'
-            else:
-                 info['video_fps'] = 'N/A'
-            
-            v_br = video_stream.get('bit_rate')
-            if not v_br and 'format' in data: v_br = data['format'].get('bit_rate')
-            info['video_bitrate'] = f"{int(v_br) // 1000} kbps" if v_br else 'N/A'
-        
-        if audio_stream:
-            info['audio_codec'] = audio_stream.get('codec_name', 'N/A')
-            a_br = audio_stream.get('bit_rate')
-            info['audio_bitrate'] = f"{int(a_br) // 1000} kbps" if a_br else 'N/A'
-            
-        return info
-    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-        print(f"Error fetching media info for {file_path}: {e}")
-        return {"error": "Could not retrieve media information."}
-
 def fetch_formats(url):
+    """
+    **FIXED FUNCTION**
+    More robustly fetches and categorizes video and audio formats from yt-dlp.
+    """
     try:
         ydl_opts = {'quiet': True}
         if os.path.exists(COOKIES_FILE):
             ydl_opts['cookiefile'] = COOKIES_FILE
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-        formats = info.get('formats', [])
-        video_formats, audio_formats, raw_lines = [], [], []
+            formats = info.get('formats', [])
+        
+        video_formats = []
+        audio_formats = []
+        raw_lines = []
 
         for f in formats:
-            if not f.get('format_id'): continue
-            fid, ext = f['format_id'], f.get('ext', 'u')
-            height, width = f.get('height'), f.get('width')
-            vcodec, acodec = f.get('vcodec'), f.get('acodec')
+            if not f.get('format_id'):
+                continue
+            
+            # --- Extract all relevant data from the format dict ---
+            fid = f['format_id']
+            ext = f.get('ext', 'unknown')
+            height = f.get('height')
+            width = f.get('width')
+            vcodec = f.get('vcodec')
+            acodec = f.get('acodec')
             fps = f.get('fps')
             size_bytes = f.get('filesize') or f.get('filesize_approx')
+
+            # --- Prepare display strings ---
             res = f"{width}x{height}" if height else "audio"
+            fps_str = str(int(fps)) if fps else ''
             fps_int = int(fps) if fps else 0
             size = human_size(size_bytes)
-            raw_lines.append(f"{fid:>3} {ext:<7} {res:<9} {fps_int:>3}fps {size:<10} {vcodec or 'none':<12} {acodec or 'none'}")
-            is_video = vcodec and vcodec != 'none' and height
-            is_audio = acodec and acodec != 'none'
+            vcodec_str = vcodec if vcodec and vcodec != 'none' else 'none'
+            acodec_str = acodec if acodec and acodec != 'none' else 'none'
 
-            if is_audio and not is_video:
+            # --- Create the raw display line for the <pre> block ---
+            raw_line = f"{fid:>3}  {ext:<7}  {res:<9}  {fps_str:>3}   {size:<10} {vcodec_str:<12} {acodec_str}"
+            raw_lines.append(raw_line)
+
+            # --- Logic to categorize the format ---
+            is_video_present = vcodec and vcodec != 'none' and height
+            is_audio_present = acodec and acodec != 'none'
+
+            if is_audio_present and not is_video_present:
+                # This is an audio-only stream.
                 abr = f.get('abr', 0)
-                audio_formats.append({'id': fid, 'display': f"{acodec.upper()} | {int(abr)}k | ({size})", 'br': abr or 0})
-            elif is_video:
+                abitrate = f"{int(abr)}k" if abr else "N/A"
+                display = f"{acodec.upper()} | {abitrate} | ({size})"
+                audio_formats.append({'id': fid, 'display': display, 'br': abr or 0})
+            
+            elif is_video_present:
+                # This is a video stream (which may or may not contain audio).
                 br = f.get('tbr') or f.get('vbr') or 0
+                vbitrate = f"{int(br)}k" if br else "N/A"
+                vcodec_name = vcodec.upper()
+                fps_display = f"{fps_int}fps" if fps_int else 'N/A fps'
+                display = f"{height}p | {fps_display} | {vcodec_name} | {vbitrate} | ({size})"
+                is_muxed = is_audio_present # If audio is present, it's a muxed format
                 video_formats.append({
-                    'id': fid, 'display': f"{height}p | {fps_int}fps | {vcodec.upper()} | {int(br)}k | ({size})",
-                    'h': height, 'fps': fps_int, 'is_muxed': is_audio
+                    'id': fid,
+                    'display': display,
+                    'h': height,
+                    'fps': fps_int,
+                    'is_muxed': is_muxed
                 })
+
+        # --- Sort and return the categorized formats ---
+        video_formats.sort(key=lambda x: (x.get('h') or 0, x.get('fps') or 0), reverse=True)
+        audio_formats.sort(key=lambda x: x.get('br') or 0, reverse=True)
+        formats_string = '\n'.join(raw_lines)
+        return formats_string, video_formats, audio_formats
         
-        video_formats.sort(key=lambda x: (x.get('h', 0), x.get('fps', 0)), reverse=True)
-        audio_formats.sort(key=lambda x: x.get('br', 0), reverse=True)
-        return '\n'.join(raw_lines), video_formats, audio_formats
     except Exception as e:
+        print(f"Error in fetch_formats: {e}") 
         flash(f"❌ Error fetching formats: {str(e)}", "error")
         return "", [], []
 
 def get_original_filename(url):
-    try:
-        ydl_opts = {'quiet': True}
-        if os.path.exists(COOKIES_FILE): ydl_opts['cookiefile'] = COOKIES_FILE
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        title = info.get('title', 'download').strip()
-        return f"{re.sub(r'[\\/*?:\"<>|]', '_', title)}.mkv"
-    except Exception:
-        return "download.mkv"
+    ydl_opts = {'quiet': True}
+    if os.path.exists(COOKIES_FILE):
+        ydl_opts['cookiefile'] = COOKIES_FILE
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    title = info.get('title', '').strip()
+    if not title:
+        title = 'download'
+    # Use the safe filename function that doesn't strip slashes
+    safe_title = re.sub(r'[\\/*?:"<>|]', '_', title)
+    return f"{safe_title}.mkv"
 
-def run_command_with_progress(command, stage, q):
+
+def run_command_with_progress(command, stage, queue_instance):
+    """Runs a command, captures its output, and sends progress to the queue."""
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', errors='ignore')
+    
     for line in iter(process.stdout.readline, ''):
-        q.put({"log": line.strip()})
+        queue_instance.put({"log": line.strip()})
         match = re.search(r'\[download\]\s+([0-9.]+)%', line)
         if match:
-            q.put({"stage": stage, "percent": float(match.group(1))})
-    if process.wait() != 0:
-        raise subprocess.CalledProcessError(process.returncode, command)
+            percent = float(match.group(1))
+            queue_instance.put({"stage": stage, "percent": percent})
+            
+    process.stdout.close()
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
 
 def upload_to_pixeldrain(file_path, filename, q):
+    """Upload a file to Pixeldrain and send progress to the queue."""
     try:
+        while not q.empty():
+            q.get()
+
         q.put({"stage": f"Uploading '{filename}' to Pixeldrain...", "percent": 10})
+        
         api_url = "https://pixeldrain.com/api/file"
         with open(file_path, 'rb') as f:
             files = {'file': (filename, f)}
             auth = ('', PIXELDRAIN_API_KEY) if PIXELDRAIN_API_KEY else None
-            q.put({"stage": "Sending data...", "percent": 50})
+            
+            q.put({"stage": "Sending data to Pixeldrain...", "percent": 50})
             response = requests.post(api_url, files=files, auth=auth)
+        
         response.raise_for_status()
         result = response.json()
+        
         if result.get("success"):
             file_id = result.get("id")
             pixeldrain_url = f"https://pixeldrain.com/u/{file_id}"
-            q.put({"stage": "✅ Pixeldrain Upload Complete!", "percent": 100})
-            q.put({"log": f"Success! Link: {pixeldrain_url}", "final_url": pixeldrain_url})
+            
+            q.put({"stage": "✅ Upload Complete!", "percent": 100})
+            q.put({
+                "log": f"Successfully uploaded! Link: {pixeldrain_url}",
+                "final_url": pixeldrain_url
+            })
         else:
-            q.put({"error": f"Pixeldrain API error: {result.get('message', 'Unknown')}"})
+            error_msg = f"Pixeldrain API error: {result.get('message', 'Unknown error')}"
+            q.put({"error": error_msg})
+            
     except Exception as e:
-        q.put({"error": f"Pixeldrain upload failed: {str(e)}"})
+        q.put({"error": f"Upload failed: {str(e)}"})
     finally:
         q.put({"log": "DONE"})
 
-def upload_to_pcloud(file_path, filename, q):
-    try:
-        q.put({"stage": f"Uploading '{filename}' to pCloud...", "percent": 10})
-        pc = get_pcloud_client()
-        pc.createfolderifnotexists(path=f"/{PCLOUD_FOLDER}")
-        q.put({"stage": "Sending data to pCloud...", "percent": 50})
-        result = pc.uploadfile(files=[file_path], path=f"/{PCLOUD_FOLDER}")
-        if result and result.get('metadata'):
-            q.put({"stage": "✅ pCloud Upload Complete!", "percent": 100})
-            q.put({"log": f"Uploaded '{filename}' to pCloud.", "pcloud_success": True})
-        else:
-            q.put({"error": f"pCloud API error: {result.get('error', 'Unknown')}"})
-    except Exception as e:
-        q.put({"error": f"pCloud upload failed: {str(e)}"})
-    finally:
-        q.put({"log": "DONE"})
+def estimate_encoding_time(duration, codec, preset):
+    """Estimate encoding time based on duration, codec, and preset."""
+    preset_factors = {
+        'h265': {
+            'ultrafast': 0.5, 'superfast': 0.7, 'veryfast': 0.9, 'faster': 1.0,
+            'fast': 1.2, 'medium': 1.5, 'slow': 2.0, 'slower': 2.5, 'veryslow': 3.0, 'placebo': 4.0
+        },
+        'av1': {str(i): 1.5 + (i / 13.0) * 2.0 for i in range(14)}
+    }
+    factor = preset_factors.get(codec, {}).get(preset, 1.5)
+    estimated_seconds = duration * factor
+    hours, rem = divmod(estimated_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
 
 def get_media_duration(file_path):
-    if not is_media_file(file_path): return 0
+    """Get duration of media file using ffprobe, returns 0 for non-media files."""
+    if not is_media_file(file_path):
+        return 0
+    
     try:
-        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
-        duration_str = subprocess.check_output(cmd, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
+        ffprobe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+        duration_str = subprocess.check_output(ffprobe_cmd, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
         return float(duration_str) if duration_str else 0
     except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
         return 0
 
 def get_audio_channels(file_path):
+    """Get the number of audio channels in a media file."""
     try:
-        cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
-        channels_str = subprocess.check_output(cmd, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
+        ffprobe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+        channels_str = subprocess.check_output(ffprobe_cmd, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
         return int(channels_str) if channels_str else 2
     except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
         return 2
 
-def encode_file(input_path, output_filename, codec, preset, pass_mode, bitrate, crf, audio_bitrate, fps, force_stereo, q, **kwargs):
+def encode_file(input_path, output_filename, codec, preset, pass_mode, bitrate, crf, audio_bitrate, fps, force_stereo, q, upload_pixeldrain=False):
+    print("Encoding thread started")
     safe_output = get_safe_filename(output_filename)
     output_path = os.path.join(DOWNLOAD_FOLDER, safe_output)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if os.path.exists(output_path): os.remove(output_path)
     
+    # Create parent directories if they don't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    if os.path.exists(output_path):
+        os.remove(output_path)
+        
     try:
-        while not q.empty(): q.get()
+        while not q.empty():
+            q.get()
         q.put({"stage": "Initializing encoding...", "percent": 0})
+        
         if not is_media_file(input_path):
-            q.put({"error": "File type cannot be encoded."}); return
+            q.put({"error": "This file type cannot be encoded. Only video and audio files are supported."})
+            return
         
         duration = get_media_duration(input_path)
+        audio_channels = get_audio_channels(input_path)
+        bitrate_val = 0
+        if bitrate and bitrate.strip():
+            try: bitrate_val = int(bitrate)
+            except ValueError: bitrate_val = 0
+        
+        audio_bitrate_val = int(audio_bitrate) if audio_bitrate else 96
+        if pass_mode == "1-pass" and codec != "none":
+            crf_val = int(crf) if crf else (28 if codec == 'h265' else 35)
+            if bitrate_val == 0:
+                bitrate_val = 2000 if codec == 'h265' else 1500
+        estimated_size_mb = (bitrate_val + audio_bitrate_val) * duration / 8192.0
+        q.put({"log": f"Estimated output file size: {estimated_size_mb:.2f} MB"})
+
+        if codec != "none":
+            est_time = estimate_encoding_time(duration, codec, preset)
+            q.put({"log": f"Estimated encoding time: {est_time} (HH:MM:SS)"})
+
         if codec == "none":
             shutil.copy2(input_path, output_path)
-            q.put({"stage": "✅ Copied!", "percent": 100})
+            q.put({"stage": "✅ Copied!", "percent": 100, "log": "File copied without encoding."})
         else:
+            video_codec = "libx265" if codec == "h265" else "libsvtav1"
+            crf_val = int(crf) if crf else (28 if codec == 'h265' else 35)
             stage_msg = f"Encoding to {codec.upper()}..."
             q.put({"stage": stage_msg, "percent": 0})
             ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_path]
-            video_codec = "libx265" if codec == "h265" else "libsvtav1"
             
             if pass_mode == "2-pass":
-                bitrate_val = int(bitrate) if bitrate and bitrate.strip() else 0
-                if bitrate_val < 100: q.put({"error": "Bitrate required for 2-pass."}); return
+                if bitrate_val == 0:
+                    q.put({"error": "Video bitrate is required for 2-pass encoding mode."})
+                    return
+                    
                 video_opts = ["-c:v", video_codec, "-preset", preset, "-b:v", f"{bitrate_val}k"]
                 pass1_cmd = ffmpeg_cmd + video_opts + ["-pass", "1", "-an", "-f", "null", "-"]
-                subprocess.run(pass1_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                ffmpeg_cmd.extend(video_opts + ["-pass", "2"])
+                subprocess.run(pass1_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                ffmpeg_cmd += video_opts + ["-pass", "2"]
             else:
-                crf_val = int(crf) if crf else (28 if codec == 'h265' else 35)
-                ffmpeg_cmd.extend(["-c:v", video_codec, "-preset", preset, "-crf", str(crf_val)])
-
-            if fps: ffmpeg_cmd.extend(["-r", fps])
-            audio_bitrate_val = int(audio_bitrate) if audio_bitrate else 96
-            ffmpeg_cmd.extend(["-ac", "2" if force_stereo else str(get_audio_channels(input_path)), "-c:a", "libopus", "-b:a", f"{audio_bitrate_val}k"])
+                ffmpeg_cmd += ["-c:v", video_codec, "-preset", preset, "-crf", str(crf_val)]
+            
+            if fps:
+                ffmpeg_cmd.extend(["-r", fps])
+            
+            if force_stereo or audio_channels <= 2:
+                ffmpeg_cmd.extend(["-ac", "2", "-c:a", "libopus", "-b:a", f"{audio_bitrate_val}k"])
+            else:
+                ffmpeg_cmd.extend(["-c:a", "libopus", "-b:a", f"{audio_bitrate_val}k"])
+            
             ffmpeg_cmd.append(output_path)
-
             process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', errors='ignore')
             for line in iter(process.stdout.readline, ''):
                 q.put({"log": line.strip()})
@@ -1049,68 +1052,93 @@ def encode_file(input_path, output_filename, codec, preset, pass_mode, bitrate, 
                     match = re.search(r'time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})', line)
                     if match:
                         h, m, s, ms = map(int, match.groups())
-                        percent = min(100, ((h*3600 + m*60 + s + ms/100) / duration) * 100)
+                        current = h*3600 + m*60 + s + ms/100
+                        percent = min(100, (current / duration) * 100)
                         q.put({"stage": stage_msg, "percent": percent})
-            if process.wait() != 0: raise subprocess.CalledProcessError(process.returncode, ffmpeg_cmd)
-            q.put({"stage": "✅ Encoding Complete!", "percent": 100})
-
-        if kwargs.get("upload_pixeldrain"):
+            if process.wait() != 0:
+                raise subprocess.CalledProcessError(process.returncode, ffmpeg_cmd)
+            q.put({"stage": "✅ Done!", "percent": 100, "log": f"{codec.upper()} encoding complete."})
+        if upload_pixeldrain:
             upload_to_pixeldrain(output_path, os.path.basename(safe_output), q)
-        if kwargs.get("upload_pcloud"):
-            upload_to_pcloud(output_path, os.path.basename(safe_output), q)
     except Exception as e:
         q.put({"error": str(e)})
     finally:
         q.put({"log": "DONE"})
 
-def download_file_directly(url, q, upload_pixeldrain_direct=False, upload_pcloud_direct=False):
+# -----------------------------
+# Download Functions
+# -----------------------------
+def download_file_directly(url, q, upload_pixeldrain_direct=False):
+    print("Direct download thread started")
     try:
-        while not q.empty(): q.get()
+        while not q.empty():
+            q.get()
         q.put({"stage": "Starting direct download...", "percent": 0})
         with requests.get(url, stream=True, allow_redirects=True, headers={'User-Agent': 'Mozilla/5.0'}) as r:
             r.raise_for_status()
-            filename = "direct_download"
+            filename = None
             cd_header = r.headers.get('content-disposition')
             if cd_header:
-                match = re.search(r"filename\*=([^']*)''([^;]*)", cd_header) or re.search(r'filename="?([^"]+)"?', cd_header)
-                if match: filename = unquote(match.group(1))
-            if filename == "direct_download":
+                match_star = re.search(r"filename\*=([^']*)''([^;]*)", cd_header)
+                if match_star:
+                    charset = match_star.group(1); encoded_name = match_star.group(2)
+                    try: filename = unquote(encoded_name, encoding=charset)
+                    except Exception: filename = unquote(encoded_name)
+                if not filename:
+                    match_simple = re.search(r'filename="?([^"]+)"?', cd_header)
+                    if match_simple: raw_name = match_simple.group(1); filename = raw_name
+            if not filename:
                 filename_from_url = url.split('/')[-1].split('?')[0]
                 if filename_from_url: filename = unquote(filename_from_url)
-            
+                else: filename = "direct_download"
             safe_name = get_safe_filename(filename)
             final_path = os.path.join(DOWNLOAD_FOLDER, safe_name)
             total_size = int(r.headers.get('content-length', 0))
             downloaded_size = 0
+            q.put({"log": f"Identified filename: '{filename}'"})
+            q.put({"log": f"Saving as: '{safe_name}'"})
+            
+            # Create parent directories if they don't exist
             os.makedirs(os.path.dirname(final_path), exist_ok=True)
+            
             with open(final_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk); downloaded_size += len(chunk)
                     if total_size > 0:
-                        q.put({"stage": "Downloading...", "percent": (downloaded_size / total_size) * 100})
+                        percent = (downloaded_size / total_size) * 100
+                        q.put({"stage": "Downloading...", "percent": percent})
         q.put({"stage": "✅ Download complete!", "percent": 100})
-        if upload_pixeldrain_direct: upload_to_pixeldrain(final_path, safe_name, q)
-        if upload_pcloud_direct: upload_to_pcloud(final_path, safe_name, q)
+        if upload_pixeldrain_direct:
+            upload_to_pixeldrain(final_path, os.path.basename(safe_name), q)
     except Exception as e:
         q.put({"error": f"Direct download failed: {str(e)}"})
     finally:
         q.put({"log": "DONE"})
 
 def upload_file_directly_to_pixeldrain(url, q):
+    print("Direct upload thread started")
     try:
-        while not q.empty(): q.get()
-        q.put({"stage": "Starting direct remote upload...", "percent": 0})
+        while not q.empty():
+            q.get()
+        q.put({"stage": "Starting direct upload to Pixeldrain...", "percent": 0})
         with requests.get(url, stream=True, allow_redirects=True, headers={'User-Agent': 'Mozilla/5.0'}) as r:
             r.raise_for_status()
-            filename = "direct_upload"
+            filename = None
             cd_header = r.headers.get('content-disposition')
             if cd_header:
-                match = re.search(r"filename\*=([^']*)''([^;]*)", cd_header) or re.search(r'filename="?([^"]+)"?', cd_header)
-                if match: filename = unquote(match.group(1))
-            if filename == "direct_upload":
+                match_star = re.search(r"filename\*=([^']*)''([^;]*)", cd_header)
+                if match_star:
+                    charset = match_star.group(1)
+                    encoded_name = match_star.group(2)
+                    try: filename = unquote(encoded_name, encoding=charset)
+                    except Exception: filename = unquote(encoded_name)
+                if not filename:
+                    match_simple = re.search(r'filename="?([^"]+)"?', cd_header)
+                    if match_simple: raw_name = match_simple.group(1); filename = raw_name
+            if not filename:
                 filename_from_url = url.split('/')[-1].split('?')[0]
                 if filename_from_url: filename = unquote(filename_from_url)
-
+                else: filename = "direct_upload"
             q.put({"log": f"Identified filename: '{filename}'"})
             api_url = "https://pixeldrain.com/api/file"
             files = {'file': (filename, r.raw, r.headers.get('content-type', 'application/octet-stream'))}
@@ -1119,52 +1147,105 @@ def upload_file_directly_to_pixeldrain(url, q):
             response.raise_for_status()
             result = response.json()
             if result.get("success"):
-                pixeldrain_url = f"https://pixeldrain.com/u/{result.get('id')}"
-                q.put({"stage": "✅ Upload complete!", "percent": 100, "final_url": pixeldrain_url})
+                file_id = result.get("id")
+                pixeldrain_url = f"https://pixeldrain.com/u/{file_id}"
+                q.put({"stage": "✅ Upload complete!", "percent": 100})
+                q.put({
+                    "log": f"File uploaded to Pixeldrain: {pixeldrain_url}",
+                    "final_url": pixeldrain_url
+                })
             else:
-                q.put({"error": f"Pixeldrain API error: {result.get('message', 'Unknown')}"})
+                q.put({"error": f"Pixeldrain API error: {result.get('message', 'Unknown error')}"})
+    except requests.exceptions.RequestException as e:
+        q.put({"error": f"Network error uploading file: {str(e)}"})
     except Exception as e:
-        q.put({"error": f"Direct remote upload failed: {str(e)}"})
+        q.put({"error": f"Unexpected error: {str(e)}"})
     finally:
         q.put({"log": "DONE"})
 
-
-def download_and_convert(url, video_id, audio_id, filename, codec, preset, pass_mode, bitrate, crf, audio_bitrate, fps, force_stereo, q, is_muxed, **kwargs):
+def download_and_convert(url, video_id, audio_id, filename, codec, preset, pass_mode, bitrate, crf, audio_bitrate, fps, force_stereo, q, is_muxed, upload_pixeldrain=False):
+    print("Download and convert thread started")
     safe_name = get_safe_filename(filename)
     base_name, _ = os.path.splitext(safe_name)
-    final_path = os.path.join(DOWNLOAD_FOLDER, safe_name)
+    final_path = os.path.join(DOWNLOAD_FOLDER, base_name + ".mkv")
     tmp_path_template = os.path.join(DOWNLOAD_FOLDER, base_name + ".part")
     
     try:
-        while not q.empty(): q.get()
+        while not q.empty():
+            q.get()
         q.put({"stage": "Initializing download...", "percent": 0})
         yt_formats = f"{video_id}+{audio_id}" if audio_id else (video_id if is_muxed else f"{video_id}+bestaudio")
+        q.put({"stage": "Downloading with yt-dlp...", "percent": 0})
         yt_dlp_cmd = ["yt-dlp", "-f", yt_formats, "-o", tmp_path_template, "--merge-output-format", "mkv", url]
-        if os.path.exists(COOKIES_FILE): yt_dlp_cmd.extend(["--cookies", COOKIES_FILE])
+        if os.path.exists(COOKIES_FILE):
+            yt_dlp_cmd.extend(["--cookies", COOKIES_FILE])
         run_command_with_progress(yt_dlp_cmd, "Downloading with yt-dlp...", q)
         q.put({"stage": "Download Complete", "percent": 100})
 
         found_files = [f for f in os.listdir(DOWNLOAD_FOLDER) if f.startswith(os.path.basename(tmp_path_template))]
-        if not found_files: raise FileNotFoundError("yt-dlp did not create the expected file.")
+        if not found_files:
+            raise FileNotFoundError(f"yt-dlp did not create the expected file: {os.path.basename(tmp_path_template)}")
         actual_tmp_path = os.path.join(DOWNLOAD_FOLDER, found_files[0])
+        q.put({"log": f"Located temporary file: {actual_tmp_path}"})
         
         if codec == "none":
             if os.path.exists(final_path): os.remove(final_path)
             os.rename(actual_tmp_path, final_path)
             q.put({"stage": "✅ Done!", "log": "File saved without encoding."})
         else:
-            final_path = os.path.join(DOWNLOAD_FOLDER, base_name + ".mkv")
-            # Collect all encode_file arguments from the current function's scope
-            encode_options = {
-                'input_path': actual_tmp_path, 'output_filename': os.path.basename(final_path),
-                'codec': codec, 'preset': preset, 'pass_mode': pass_mode, 'bitrate': bitrate,
-                'crf': crf, 'audio_bitrate': audio_bitrate, 'fps': fps, 'force_stereo': force_stereo
-            }
-            encode_file(**encode_options, q=q, **kwargs)
-        
-        # After any potential encoding, check for uploads
-        if kwargs.get("upload_pixeldrain"): upload_to_pixeldrain(final_path, os.path.basename(final_path), q)
-        if kwargs.get("upload_pcloud"): upload_to_pcloud(final_path, os.path.basename(final_path), q)
+            duration = get_media_duration(actual_tmp_path)
+            bitrate_val = 0
+            if bitrate and bitrate.strip():
+                try: bitrate_val = int(bitrate)
+                except ValueError: bitrate_val = 0
+            
+            audio_bitrate_val = int(audio_bitrate) if audio_bitrate else 96
+            if pass_mode == "1-pass" and codec != "none":
+                if bitrate_val == 0:
+                    bitrate_val = 2000 if codec == 'h265' else 1500
+            
+            stage_msg = f"Encoding to {codec.upper()}..."
+            q.put({"stage": stage_msg, "percent": 0})
+            ffmpeg_cmd = ["ffmpeg", "-y", "-i", actual_tmp_path]
+            crf_val = int(crf) if crf else (28 if codec == 'h265' else 35)
+            video_codec = "libx265" if codec == "h265" else "libsvtav1"
+            
+            if pass_mode == "2-pass":
+                if bitrate_val == 0:
+                    q.put({"error": "Video bitrate is required for 2-pass encoding."})
+                    return
+                video_opts = ["-c:v", video_codec, "-preset", str(preset), "-b:v", f"{bitrate_val}k"]
+                pass1_cmd = ffmpeg_cmd + video_opts + ["-pass", "1", "-an", "-f", "null", "-"]
+                subprocess.run(pass1_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                ffmpeg_cmd.extend(video_opts + ["-pass", "2"])
+            else:
+                ffmpeg_cmd.extend(["-c:v", video_codec, "-preset", str(preset), "-crf", str(crf_val)])
+            
+            if fps:
+                ffmpeg_cmd.extend(["-r", fps])
+            
+            ffmpeg_cmd.extend(["-ac", "2" if force_stereo else str(get_audio_channels(actual_tmp_path)), "-c:a", "libopus", "-b:a", f"{audio_bitrate_val}k"])
+            ffmpeg_cmd.append(final_path)
+
+            process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', errors='ignore')
+            for line in iter(process.stdout.readline, ''):
+                q.put({"log": line.strip()})
+                if duration:
+                    match = re.search(r'time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})', line)
+                    if match:
+                        h, m, s, ms = map(int, match.groups())
+                        current_time = h * 3600 + m * 60 + s + ms / 100.0
+                        percent = min(100, (current_time / duration) * 100)
+                        q.put({"stage": stage_msg, "percent": percent})
+            if process.wait() != 0: raise subprocess.CalledProcessError(process.returncode, ffmpeg_cmd)
+            q.put({"stage": "✅ Done!", "percent": 100, "log": f"{codec.upper()} encoding complete."})
+            
+            if 'actual_tmp_path' in locals() and os.path.exists(actual_tmp_path):
+                os.remove(actual_tmp_path)
+                
+        if upload_pixeldrain:
+            upload_to_pixeldrain(final_path, os.path.basename(final_path), q)
+            
     except Exception as e:
         q.put({"error": str(e)})
     finally:
@@ -1173,63 +1254,21 @@ def download_and_convert(url, video_id, audio_id, filename, codec, preset, pass_
             except OSError: pass
         q.put({"log": "DONE"})
 
-def manual_merge_worker(url, video_id, audio_id, filename, q):
-    """Worker to download and merge streams using manually provided IDs."""
-    safe_name = get_safe_filename(filename)
-    base_name, _ = os.path.splitext(safe_name)
-    final_path = os.path.join(DOWNLOAD_FOLDER, base_name + ".mkv")
-
-    try:
-        while not q.empty(): q.get()
-        q.put({"stage": "Initializing manual download...", "percent": 0})
-        
-        video_id_clean = video_id.strip()
-        audio_id_clean = audio_id.strip() if audio_id else ""
-
-        if audio_id_clean:
-            format_selector = f"{video_id_clean}+{audio_id_clean}"
-        else:
-            format_selector = video_id_clean
-
-        yt_dlp_cmd = ["yt-dlp", "-f", format_selector, "-o", final_path, "--merge-output-format", "mkv", url]
-        if os.path.exists(COOKIES_FILE): 
-            yt_dlp_cmd.extend(["--cookies", COOKIES_FILE])
-
-        run_command_with_progress(yt_dlp_cmd, "Downloading & Merging with yt-dlp...", q)
-        
-        q.put({"stage": "✅ Download Complete!", "percent": 100})
-    except Exception as e:
-        q.put({"error": str(e)})
-    finally:
-        q.put({"log": "DONE"})
-
 # -----------------------------
 # Flask Routes
 # -----------------------------
 @app.route("/")
 def index():
     if 'last_upload_url' in session:
-        flash(f"✅ Upload completed! <a href='{session.pop('last_upload_url')}' target='_blank'>View Link</a>", "success")
-    if 'last_pcloud_success' in session:
-        session.pop('last_pcloud_success')
-        flash("✅ Upload to pCloud completed successfully!", "success")
-    template_vars = {
-        "url": "", "formats": None, "download_started": False,
-        "manual_url": "", "manual_formats_raw": None, "manual_filename": ""
-    }
-    return render_template_string(TEMPLATE, **template_vars)
+        upload_url = session.pop('last_upload_url', None)
+        flash(f"✅ Upload completed! <a href='{upload_url}' target='_blank'>View on Pixeldrain</a>", "success")
+    return render_template_string(TEMPLATE, url="", formats=None, download_started=False)
 
 @app.route("/", methods=["POST"])
 def index_post():
     action = request.form.get("action")
-    form_data = {
-        "url": request.form.get("url", "").strip(),
-        "manual_url": request.form.get("manual_url", "").strip(),
-        "manual_formats_raw": None,
-        "manual_filename": "",
-        "download_started": False
-    }
-
+    form_data = { "url": request.form.get("url", "").strip(), "download_started": False }
+    
     if action == "fetch":
         formats_string, video_formats, audio_formats = fetch_formats(form_data["url"])
         if formats_string:
@@ -1237,68 +1276,33 @@ def index_post():
                 "formats": formats_string, "video_formats": video_formats,
                 "audio_formats": audio_formats, "original_name": get_original_filename(form_data["url"])
             })
-            session['video_formats_for_mux_check'] = video_formats
-            flash("✅ Advanced formats fetched!", "success")
+            flash("✅ Formats fetched successfully!", "success")
         return render_template_string(TEMPLATE, **form_data)
     
-    elif action == "manual_fetch":
-        url = form_data["manual_url"]
-        formats_raw, _, __ = fetch_formats(url)
-        if formats_raw:
-            form_data["manual_formats_raw"] = formats_raw
-            form_data["manual_filename"] = get_original_filename(url).replace('.mkv', '')
-            flash("✅ Manual formats fetched successfully!", "success")
-        return render_template_string(TEMPLATE, **form_data)
-    
-    if action in ["download", "direct_download", "direct_upload_pixeldrain", "direct_upload_pcloud", "manual_merge"]:
+    task_thread = None
+    if action in ["download", "direct_download", "direct_upload_pixeldrain"]:
         form_data["download_started"] = True
-        thread_target, thread_args, thread_kwargs = None, (), {}
-
         if action == "download":
-            video_formats = session.pop('video_formats_for_mux_check', [])
-            video_id = request.form.get("video_id")
-            is_muxed = any(f['id'] == video_id and f.get('is_muxed') for f in video_formats)
-            thread_target = download_and_convert
-            thread_args = (
-                request.form.get("url"), video_id, request.form.get("audio_id"),
+            is_muxed = any(f['id'] == request.form.get("video_id") and f.get('is_muxed') for f in (form_data.get('video_formats') or []))
+            task_thread = threading.Thread(target=download_and_convert, args=(
+                request.form.get("url"), request.form.get("video_id"), request.form.get("audio_id"),
                 request.form.get("filename"), request.form.get("codec"), request.form.get("preset"),
                 request.form.get("pass_mode"), request.form.get("bitrate"), request.form.get("crf"),
                 request.form.get("audio_bitrate"), request.form.get("fps"),
-                request.form.get("force_stereo") == "true", progress_queue, is_muxed
-            )
-            thread_kwargs = {
-                "upload_pixeldrain": request.form.get("upload_pixeldrain") == "true",
-                "upload_pcloud": request.form.get("upload_pcloud") == "true"
-            }
-        
-        elif action == "manual_merge":
-            thread_target = manual_merge_worker
-            thread_args = (
-                request.form.get("manual_url"),
-                request.form.get("manual_video_id"),
-                request.form.get("manual_audio_id"),
-                request.form.get("manual_filename"),
-                progress_queue
-            )
-        
+                request.form.get("force_stereo") == "true", progress_queue, is_muxed,
+                request.form.get("upload_pixeldrain") == "true"
+            ))
         elif action == "direct_download":
-            thread_target = download_file_directly
-            thread_args = (
+            task_thread = threading.Thread(target=download_file_directly, args=(
                 request.form.get("direct_url"), progress_queue,
-                request.form.get("upload_pixeldrain_direct") == "true",
-                request.form.get("upload_pcloud_direct") == "true"
-            )
-        
+                request.form.get("upload_pixeldrain_direct") == "true"
+            ))
         elif action == "direct_upload_pixeldrain":
-            thread_target = upload_file_directly_to_pixeldrain
-            thread_args = (request.form.get("direct_url"), progress_queue)
-
-        elif action == "direct_upload_pcloud":
-            thread_target = download_file_directly
-            thread_args = (request.form.get("direct_url"), progress_queue, False, True)
-
-        if thread_target:
-            task_thread = threading.Thread(target=thread_target, args=thread_args, kwargs=thread_kwargs)
+            task_thread = threading.Thread(target=upload_file_directly_to_pixeldrain, args=(
+                request.form.get("direct_url"), progress_queue
+            ))
+        
+        if task_thread:
             task_thread.daemon = True
             task_thread.start()
             
@@ -1309,11 +1313,12 @@ def progress_stream():
     def generate():
         while True:
             try:
-                msg = progress_queue.get(timeout=30)
+                msg = progress_queue.get()
                 yield f"data: {json.dumps(msg)}\n\n"
-                if msg.get("log") == "DONE": break
-            except queue.Empty: pass
-            except GeneratorExit: break
+            except queue.Empty:
+                time.sleep(0.1)
+            except GeneratorExit:
+                break
     return Response(generate(), mimetype="text/event-stream")
 
 @app.route("/upload_direct", methods=["POST"])
@@ -1322,10 +1327,17 @@ def upload_direct():
         file = request.files['file']
         filename = secure_filename(file.filename)
         file.save(os.path.join(DOWNLOAD_FOLDER, filename))
-        thread = threading.Thread(target=upload_to_pixeldrain, args=(os.path.join(DOWNLOAD_FOLDER, filename), filename, progress_queue))
+        
+        thread = threading.Thread(target=upload_to_pixeldrain, args=(
+            os.path.join(DOWNLOAD_FOLDER, filename), filename, progress_queue
+        ))
         thread.daemon = True
         thread.start()
-        return render_template_string(FILE_OPERATION_TEMPLATE, operation_title=f"Uploading: {filename}", download_started=True)
+        
+        return render_template_string(FILE_OPERATION_TEMPLATE, 
+                                      operation_title=f"Uploading: {filename}",
+                                      download_started=True)
+                                      
     flash("No file selected", "error")
     return redirect(url_for('index'))
 
@@ -1336,453 +1348,329 @@ def upload_local():
         filename = secure_filename(file.filename)
         file_path = os.path.join(DOWNLOAD_FOLDER, filename)
         if os.path.exists(file_path):
-            flash(f"File '{filename}' already exists.", "error")
+            flash(f"A file named '{filename}' already exists.", "error")
         else:
             file.save(file_path)
             session['last_local_upload'] = filename
-    else:
-        flash("No file selected.", "error")
+        return redirect(url_for('list_files'))
+    flash("No file selected for uploading.", "error")
     return redirect(url_for('list_files'))
 
 @app.route("/files")
 def list_files():
     feedback_messages = {
-        'last_upload_url': "✅ Upload to Pixeldrain completed! <a href='{}' target='_blank'>View Link</a>",
-        'last_pcloud_success': "✅ Upload to pCloud completed successfully!",
-        'last_deleted_file': "✅ Item deleted: {}",
+        'last_upload_url': "✅ Upload completed! <a href='{}' target='_blank'>View on Pixeldrain</a>",
+        'last_deleted_file': "✅ Item deleted successfully: {}",
         'last_renamed_file': "✅ Item renamed: {old} → {new}",
-        'last_local_upload': "✅ Uploaded '{}' to server."
+        'last_local_upload': "✅ Successfully uploaded '{}' to the server."
     }
-    for key, msg_format in feedback_messages.items():
+    for key, message_format in feedback_messages.items():
         if key in session:
             value = session.pop(key)
-            flash(msg_format.format(**value) if isinstance(value, dict) else msg_format.format(value), "success")
-
-    subpath = request.args.get("path", "").strip("/")
-    current_path = os.path.join(DOWNLOAD_FOLDER, subpath)
-    if not os.path.exists(current_path) or not os.path.isdir(current_path):
-        flash(f"Folder not found: {subpath}", "error")
-        return redirect(url_for("list_files"))
-
+            if isinstance(value, dict):
+                 flash(message_format.format(**value), "success")
+            else:
+                 flash(message_format.format(value), "success")
+            
     all_items = []
-    try:
-        for entry in os.listdir(current_path):
-            full_path = os.path.join(current_path, entry)
-            rel_path = os.path.join(subpath, entry) if subpath else entry
-            mtime = os.path.getmtime(full_path)
-            is_dir = os.path.isdir(full_path)
+    # Using os.walk to get all files and directories recursively
+    for root, dirs, files in os.walk(DOWNLOAD_FOLDER, topdown=True):
+        # Sort directories and files alphabetically
+        dirs.sort(key=str.lower)
+        files.sort(key=str.lower)
+        
+        # Add directories to the list
+        for name in dirs:
+            full_path = os.path.join(root, name)
+            relative_path = os.path.relpath(full_path, DOWNLOAD_FOLDER)
             all_items.append({
-                "name": entry + ("/" if is_dir else ""), "is_dir": is_dir, "size": get_file_size(full_path) if not is_dir else "-",
-                "mtime": mtime, "rel_path": rel_path.replace("\\", "/"),
-                "is_media": is_media_file(full_path) if not is_dir else False
+                'display_path': relative_path.replace(os.sep, ' / ') + '/',
+                'path': relative_path,
+                'size': '-',
+                'is_media': False,
+                'is_folder': True,
+                'mtime': os.path.getmtime(full_path)
             })
-    except Exception as e:
-        flash(f"Error listing folder: {e}", "error")
-
-    all_items.sort(key=lambda x: (not x["is_dir"], -x["mtime"]))
-    parent_path = "/".join(subpath.split("/")[:-1]) if subpath else ""
-    parent_url = url_for("list_files", path=parent_path) if subpath else None
-    pcloud_folder_url = f"https://my.pcloud.com/browser/folder?path={quote(f'/{PCLOUD_FOLDER}')}"
-
-    return render_template_string("""
-<!DOCTYPE html><html><head><title>Downloaded Files</title><style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background-color:#f4f4f9;color:#333;margin:20px}
-.container{max-width:1000px;margin:auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1)}
-table{width:100%;border-collapse:collapse;margin-top:20px} th,td{padding:12px;border-bottom:1px solid #ddd;text-align:left;word-break:break-all}
-th{background-color:#f2f2f2} a{color:#007bff;text-decoration:none} a:hover{text-decoration:underline}
-.flash-msg{padding:10px;border-radius:4px;margin-bottom:15px} .flash-success{background-color:#d4edda;color:#155724} .flash-error{background-color:#f8d7da;color:#721c24}
-button,.button-link{background-color:#007bff;color:#fff!important;padding:5px 10px;border:none;border-radius:4px;cursor:pointer;font-size:14px;margin-right:5px;text-decoration:none;display:inline-block}
-button:hover,.button-link:hover{background-color:#0056b3} button.delete{background-color:#dc3545} button.delete:hover{background-color:#c82333}
-button.pcloud{background-color:#8E44AD} button.pcloud:hover{background-color:#732d91} button.upload{background-color:#17a2b8} button.upload:hover{background-color:#138496}
-button.encode{background-color:#28a745} button.encode:hover{background-color:#218838} button.rename{background-color:#ffc107;color:#212529!important} button.rename:hover{background-color:#e0a800}
-button.info{background-color:#0dcaf0; color: #000!important} button.info:hover{background-color:#0cb9d7}
-.actions{white-space:nowrap} .actions form{display:inline-block} .modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,.5)}
-.modal-content{background-color:#fff;margin:15% auto;padding:20px;border-radius:8px;width:500px;max-width:90%} .modal-content input{width:100%;padding:8px;margin:10px 0;box-sizing:border-box} .modal-content pre{background-color:#eee;font-family:monospace;padding:10px;border-radius:4px}
-</style></head><body><div class="container">
-<h1>Downloaded Files (Local)</h1><p><a href="{{url_for('index')}}">← Back</a> | <a href="{{url_for('pcloud_files')}}">☁️ pCloud Files</a> | <a href="{{pcloud_folder_url}}" target="_blank">↗️ Open pCloud Folder</a></p>
-{% if parent_url %}<p>📁 <a href="{{parent_url}}">← Back to parent</a></p>{% endif %}<p>Path: /{{current_path}}</p>
-{% with messages=get_flashed_messages(with_categories=true) %}{% for c,m in messages %}<div class="flash-msg flash-{{c}}">{{m|safe}}</div>{% endfor %}{% endwith %}
-<div style="border:1px solid #ddd;padding:20px;border-radius:8px;margin:20px 0"><h3>Upload New File Here</h3>
-<form method="POST" action="{{url_for('upload_local')}}" enctype="multipart/form-data"><input type="file" name="file" required><button type="submit" style="margin-top:10px">Upload</button></form></div>
-{% if all_items %}<table><thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead><tbody>
-{% for item in all_items %}<tr><td>{% if item.is_dir %}📁 <a href="{{url_for('list_files',path=item.rel_path)}}">{{item.name}}</a>{% else %}📄 {{item.name}}{% endif %}</td><td>{{item.size}}</td>
-<td class="actions">{% if not item.is_dir %}<a href="{{url_for('download_file',filepath=item.rel_path)}}" class="button-link">Download</a>{% endif %}
-<button onclick="showRenameModal('{{item.rel_path}}')" class="rename">Rename</button><button onclick="confirmDelete('{{item.rel_path}}')" class="delete">Delete</button>
-<form method="POST" action="{{url_for('upload_to_pcloud_file')}}" style="display:inline;"><input type="hidden" name="filepath" value="{{item.rel_path}}"><button type="submit" class="pcloud">To pCloud</button></form>
-<form method="POST" action="{{url_for('upload_to_pixeldrain_file')}}" style="display:inline;"><input type="hidden" name="filepath" value="{{item.rel_path}}"><button type="submit" class="upload">To Pixeldrain</button></form>
-{% if item.is_media %}<a href="{{url_for('encode_page',filepath=item.rel_path)}}" class="button-link encode">Encode</a><button type="button" onclick="showInfoModal('{{item.rel_path}}')" class="info">Info</button>{% endif %}
-</td></tr>{% endfor %}</tbody></table>
-{% else %}<p><i>No files found here.</i></p>{% endif %}</div>
-<div id="renameModal" class="modal"><div class="modal-content"><h3>Rename Item</h3><p>Current: <strong id="currentName"></strong></p>
-<form method="POST" action="{{url_for('rename_file')}}"><input type="hidden" name="old_name" id="oldNameInput"><label>New Name:</label><input type="text" name="new_name" id="newNameInput" required>
-<button type="submit">Rename</button><button type="button" onclick="closeRenameModal()">Cancel</button></form></div></div>
-<div id="infoModal" class="modal"><div class="modal-content"><h3>Media Information</h3><p><strong>File:</strong> <span id="infoFilename"></span></p>
-<pre id="infoContent"></pre><button type="button" onclick="closeInfoModal()">Close</button></div></div>
-<script>
-function confirmDelete(a){if(confirm(`Delete "${a}"? This is permanent.`)){const b=document.createElement('form');b.method='POST';b.action='/delete/'+a;document.body.appendChild(b);b.submit()}}
-function showRenameModal(a){const b=a.endsWith('/')?a.slice(0,-1):a;document.getElementById('currentName').textContent=a;document.getElementById('oldNameInput').value=a;document.getElementById('newNameInput').value=b;document.getElementById('renameModal').style.display='block';document.getElementById('newNameInput').focus()}
-function closeRenameModal(){document.getElementById('renameModal').style.display='none'}
-function showInfoModal(filepath) {
-  const modal = document.getElementById('infoModal');
-  const content = document.getElementById('infoContent');
-  const filename = document.getElementById('infoFilename');
-  filename.textContent = filepath.split('/').pop();
-  content.textContent = 'Fetching info...';
-  modal.style.display = 'block';
-  fetch(`/info/${filepath}`)
-    .then(response => { if (!response.ok) { throw new Error('Network response was not ok'); } return response.json(); })
-    .then(data => {
-      if (data.error) {
-          content.textContent = `Error: ${data.error}`;
-          return;
-      }
-      let infoText = '';
-      infoText += `Video Codec:    ${data.video_codec || 'N/A'}\\n`;
-      infoText += `Frame Rate:     ${data.video_fps || 'N/A'} fps\\n`;
-      infoText += `Video Bitrate:  ${data.video_bitrate || 'N/A'}\\n\\n`;
-      infoText += `Audio Codec:    ${data.audio_codec || 'N/A'}\\n`;
-      infoText += `Audio Bitrate:  ${data.audio_bitrate || 'N/A'}`;
-      content.textContent = infoText;
-    })
-    .catch(error => {
-      content.textContent = 'Failed to fetch media information.';
-      console.error('Error:', error);
-    });
-}
-function closeInfoModal(){document.getElementById('infoModal').style.display='none'}
-window.onclick=e=>{if(e.target==document.getElementById('renameModal'))closeRenameModal();if(e.target==document.getElementById('infoModal'))closeInfoModal()};
-</script></body></html>
-""", all_items=all_items, current_path=subpath, parent_url=parent_url, pcloud_folder_url=pcloud_folder_url)
-
-@app.route("/info/<path:filepath>")
-def get_info(filepath):
-    """API endpoint to get media info for a file."""
-    full_path = os.path.join(DOWNLOAD_FOLDER, filepath)
-    if not os.path.abspath(full_path).startswith(os.path.abspath(DOWNLOAD_FOLDER)):
-        return jsonify({"error": "Invalid file path"}), 400
-    if not os.path.exists(full_path):
-        return jsonify({"error": "File not found"}), 404
-
-    info = get_media_info(full_path)
-    if "error" in info:
-        return jsonify(info), 500
+        
+        # Add files to the list
+        for name in files:
+            full_path = os.path.join(root, name)
+            relative_path = os.path.relpath(full_path, DOWNLOAD_FOLDER)
+            all_items.append({
+                'display_path': relative_path.replace(os.sep, ' / '),
+                'path': relative_path,
+                'size': get_file_size(full_path),
+                'is_media': is_media_file(full_path),
+                'is_folder': False,
+                'mtime': os.path.getmtime(full_path)
+            })
+            
+    # Sort the final list by path to group items logically
+    all_items.sort(key=lambda x: x['path'])
     
-    return jsonify(info)
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Downloaded Files</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1, h3 { color: #444; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; word-break: break-all; }
+        th { background-color: #f2f2f2; }
+        tr:hover { background-color: #f9f9f9; }
+        td.cell-path { font-family: monospace; }
+        td.cell-path b { color: #0056b3; }
+        a { color: #007bff; text-decoration: none; margin-right: 5px; }
+        a:hover { text-decoration: underline; }
+        button { background-color: #007bff; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; margin-right: 5px; font-size: 14px; }
+        button:hover { background-color: #0056b3; }
+        button.delete { background-color: #dc3545; }
+        button.delete:hover { background-color: #c82333; }
+        button.upload { background-color: #17a2b8; }
+        button.upload:hover { background-color: #138496; }
+        button.encode { background-color: #28a745; }
+        button.encode:hover { background-color: #218838; }
+        button.rename { background-color: #ffc107; color: #212529; }
+        button.rename:hover { background-color: #e0a800; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .actions { white-space: nowrap; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background-color: #fff; margin: 15% auto; padding: 20px; border-radius: 8px; width: 500px; max-width: 90%; }
+        .modal-content input { width: 100%; padding: 8px; margin: 10px 0; box-sizing: border-box; }
+        .flash-msg { padding: 10px; border-radius: 4px; margin-bottom: 15px; }
+        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Downloaded Files</h1>
+    <p><a href="{{ url_for('index') }}">← Back to Downloader</a></p>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+            <div class="flash-msg flash-{{ category }}">{{ message|safe }}</div>
+        {% endfor %}
+    {% endwith %}
+
+    <div style="border: 1px solid #ddd; padding: 20px; border-radius: 8px; margin-top: 20px; margin-bottom: 20px;">
+        <h3>Upload New File to This List</h3>
+        <form method="POST" action="{{ url_for('upload_local') }}" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <button type="submit" style="margin-top: 10px;">Upload File</button>
+        </form>
+    </div>
+
+    {% if items %}
+        <table>
+            <thead><tr><th>Path</th><th>Size</th><th>Actions</th></tr></thead>
+            <tbody>
+                {% for item in items %}
+                <tr>
+                    <td class="cell-path">
+                        {% if item.is_folder %}
+                            <b>📁 {{ item.display_path }}</b>
+                        {% else %}
+                            📄 {{ item.display_path }}
+                        {% endif %}
+                    </td>
+                    <td>{{ item.size }}</td>
+                    <td class="actions">
+                        {% if not item.is_folder %}
+                            <a href="{{ url_for('download_file', filepath=item.path) }}">Download</a>
+                        {% endif %}
+                        <button onclick="showRenameModal('{{ item.path }}')" class="rename">Rename</button>
+                        {% if not item.is_folder %}
+                            <form method="POST" action="{{ url_for('upload_to_pixeldrain_file') }}" style="display:inline;">
+                                <input type="hidden" name="filepath" value="{{ item.path }}">
+                                <button type="submit" class="upload">Upload to Pixeldrain</button>
+                            </form>
+                            {% if item.is_media %}
+                                <a href="{{ url_for('encode_page', filepath=item.path) }}" class="encode">Encode</a>
+                            {% endif %}
+                        {% endif %}
+                        <form method="POST" action="{{ url_for('delete_file', filepath=item.path) }}" style="display:inline;">
+                            <button type="submit" class="delete" onclick="return confirm('Are you sure you want to delete \'{{ item.display_path }}\'? This cannot be undone.')">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No files downloaded yet.</p>
+    {% endif %}
+</div>
+
+<div id="renameModal" class="modal"><div class="modal-content">
+    <h3>Rename File or Folder</h3>
+    <p>Current path: <strong id="currentName"></strong></p>
+    <label>New path (relative to downloads folder):</label>
+    <input type="text" id="newName" placeholder="Enter new path">
+    <button onclick="confirmRename()">Rename</button>
+    <button onclick="closeRenameModal()">Cancel</button>
+</div></div>
+
+<script>
+    let currentFile = '';
+    function showRenameModal(filepath) {
+        currentFile = filepath;
+        document.getElementById('currentName').textContent = filepath;
+        document.getElementById('newName').value = filepath;
+        document.getElementById('renameModal').style.display = 'block';
+        document.getElementById('newName').focus();
+    }
+    function closeRenameModal() { document.getElementById('renameModal').style.display = 'none'; }
+    function confirmRename() {
+        const newName = document.getElementById('newName').value.trim();
+        if (newName && newName !== currentFile) {
+            const form = document.createElement('form');
+            form.method = 'POST'; form.action = '{{ url_for("rename_file") }}';
+            const oldInput = document.createElement('input'); oldInput.type = 'hidden'; oldInput.name = 'old_name'; oldInput.value = currentFile;
+            const newInput = document.createElement('input'); newInput.type = 'hidden'; newInput.name = 'new_name'; newInput.value = newName;
+            form.append(oldInput, newInput);
+            document.body.appendChild(form); form.submit();
+        }
+        closeRenameModal();
+    }
+    window.onclick = (event) => { if (event.target == document.getElementById('renameModal')) closeRenameModal(); };
+</script>
+</body></html>
+    """, items=all_items)
 
 @app.route("/operation_complete")
 def operation_complete():
-    if request.args.get('url'): session['last_upload_url'] = request.args.get('url')
-    if request.args.get('pcloud_success'): session['last_pcloud_success'] = True
-    if request.args.get('pcloud_action_success'):
-        session['last_pcloud_action_success'] = request.args.get('pcloud_action_success')
-        return redirect(url_for('pcloud_files'))
+    url = request.args.get('url')
+    if url:
+        session['last_upload_url'] = url
     return redirect(url_for('list_files'))
 
 @app.route("/download/<path:filepath>")
 def download_file(filepath):
+    # Security: send_from_directory is safe against path traversal.
     return send_from_directory(DOWNLOAD_FOLDER, filepath, as_attachment=True)
 
 @app.route("/delete/<path:filepath>", methods=["POST"])
 def delete_file(filepath):
+    # Construct the full path and perform security checks
     full_path = os.path.join(DOWNLOAD_FOLDER, filepath)
     if not os.path.abspath(full_path).startswith(os.path.abspath(DOWNLOAD_FOLDER)):
-        flash("Invalid path.", "error")
-    elif os.path.exists(full_path):
+        flash("Invalid path specified.", "error")
+        return redirect(url_for('list_files'))
+
+    if os.path.exists(full_path):
         try:
-            if os.path.isdir(full_path): shutil.rmtree(full_path)
-            else: os.remove(full_path)
-            session['last_deleted_file'] = filepath
+            if os.path.isdir(full_path):
+                shutil.rmtree(full_path)
+                session['last_deleted_file'] = filepath + '/'
+            else:
+                os.remove(full_path)
+                session['last_deleted_file'] = filepath
         except Exception as e:
-            flash(f"Error deleting: {e}", "error")
+            flash(f"Error deleting item: {str(e)}", "error")
     else:
         flash("Item not found.", "error")
+        
     return redirect(url_for('list_files'))
 
 @app.route("/rename", methods=["POST"])
 def rename_file():
-    old_rel = request.form.get("old_name")
-    new_rel = request.form.get("new_name")
-    if not all([old_rel, new_rel]):
-        flash("Missing names.", "error"); return redirect(url_for('list_files'))
+    old_rel_path = request.form.get("old_name")
+    new_rel_path = request.form.get("new_name")
+
+    if not all([old_rel_path, new_rel_path]):
+        flash("Both old and new paths are required.", "error")
+        return redirect(url_for('list_files'))
     
-    new_rel = get_safe_filename(new_rel.strip('/'))
-    old_path = os.path.join(DOWNLOAD_FOLDER, old_rel)
-    new_path = os.path.join(DOWNLOAD_FOLDER, new_rel)
+    # Sanitize the new path
+    new_rel_path = get_safe_filename(new_rel_path.strip('/'))
+
+    old_path = os.path.join(DOWNLOAD_FOLDER, old_rel_path)
+    new_path = os.path.join(DOWNLOAD_FOLDER, new_rel_path)
     
+    # Security checks to prevent path traversal
     if not os.path.abspath(old_path).startswith(os.path.abspath(DOWNLOAD_FOLDER)) or \
        not os.path.abspath(new_path).startswith(os.path.abspath(DOWNLOAD_FOLDER)):
-        flash("Invalid path.", "error")
-    elif not os.path.exists(old_path):
-        flash(f"Item not found: {old_rel}", "error")
+        flash("Invalid path specified.", "error")
+        return redirect(url_for('list_files'))
+    
+    if not os.path.exists(old_path):
+        flash(f"Item not found: {old_rel_path}", "error")
     elif os.path.exists(new_path):
-        flash(f"Target '{new_rel}' already exists.", "error")
+        flash(f"An item named '{new_rel_path}' already exists.", "error")
     else:
         try:
+            # Ensure the parent directory for the new path exists
             os.makedirs(os.path.dirname(new_path), exist_ok=True)
             os.rename(old_path, new_path)
-            session['last_renamed_file'] = {'old': old_rel, 'new': new_rel}
+            session['last_renamed_file'] = {'old': old_rel_path, 'new': new_rel_path}
         except Exception as e:
-            flash(f"Error renaming: {e}", "error")
+            flash(f"Error renaming item: {str(e)}", "error")
+            
     return redirect(url_for('list_files'))
 
 @app.route("/upload_to_pixeldrain", methods=["POST"])
 def upload_to_pixeldrain_file():
     filepath = request.form.get("filepath")
+    if not filepath or not os.path.exists(os.path.join(DOWNLOAD_FOLDER, filepath)):
+        flash("File not found or path is missing.", "error")
+        return redirect(url_for('list_files'))
+    
     full_path = os.path.join(DOWNLOAD_FOLDER, filepath)
-    if not filepath or not os.path.exists(full_path):
-        flash("File not found.", "error"); return redirect(url_for('list_files'))
-    thread = threading.Thread(target=upload_to_pixeldrain, args=(full_path, os.path.basename(filepath), progress_queue))
+    filename = os.path.basename(filepath)
+    
+    thread = threading.Thread(
+        target=upload_to_pixeldrain,
+        args=(full_path, filename, progress_queue)
+    )
     thread.daemon = True
     thread.start()
-    return render_template_string(FILE_OPERATION_TEMPLATE, operation_title=f"Uploading to Pixeldrain: {os.path.basename(filepath)}", download_started=True)
-
-@app.route("/upload_to_pcloud", methods=["POST"])
-def upload_to_pcloud_file():
-    filepath = request.form.get("filepath")
-    full_path = os.path.join(DOWNLOAD_FOLDER, filepath)
-    if not filepath or not os.path.exists(full_path):
-        flash("File not found.", "error"); return redirect(url_for('list_files'))
-    thread = threading.Thread(target=upload_to_pcloud, args=(full_path, os.path.basename(filepath), progress_queue))
-    thread.daemon = True
-    thread.start()
-    return render_template_string(FILE_OPERATION_TEMPLATE, operation_title=f"Uploading to pCloud: {os.path.basename(filepath)}", download_started=True)
+    
+    return render_template_string(FILE_OPERATION_TEMPLATE, 
+                                operation_title=f"Uploading: {filename}",
+                                download_started=True)
 
 @app.route("/encode/<path:filepath>")
 def encode_page(filepath):
-    if not os.path.exists(os.path.join(DOWNLOAD_FOLDER, filepath)) or not is_media_file(filepath):
-        flash("File not found or not a media file.", "error"); return redirect(url_for('list_files'))
-    suggested_output = f"{os.path.splitext(filepath)[0]}_encoded.mkv"
-    return render_template_string(ENCODE_TEMPLATE, filepath=filepath, suggested_output=suggested_output, download_started=False)
+    file_path = os.path.join(DOWNLOAD_FOLDER, filepath)
+    if not os.path.exists(file_path):
+        flash("File not found.", "error")
+        return redirect(url_for('list_files'))
+    if not is_media_file(file_path):
+        flash("This file type cannot be encoded.", "error")
+        return redirect(url_for('list_files'))
+    
+    base, _ = os.path.splitext(filepath)
+    suggested_output = f"{base}_encoded.mkv"
+    
+    return render_template_string(ENCODE_TEMPLATE, filepath=filepath,
+                                suggested_output=suggested_output,
+                                download_started=False)
 
 @app.route("/encode/<path:filepath>", methods=["POST"])
 def encode_file_post(filepath):
-    if not os.path.exists(os.path.join(DOWNLOAD_FOLDER, filepath)):
-        flash("File not found.", "error"); return redirect(url_for('list_files'))
-    
-    options = {k: v for k, v in request.form.items()}
-    options["upload_pixeldrain"] = "upload_pixeldrain" in request.form
-    options["upload_pcloud"] = "upload_pcloud" in request.form
-    thread = threading.Thread(target=encode_file, args=(os.path.join(DOWNLOAD_FOLDER, filepath),), kwargs={**options, 'q': progress_queue})
-    thread.daemon = True
-    thread.start()
-    return render_template_string(ENCODE_TEMPLATE, filepath=filepath, suggested_output=request.form.get("output_filename"), download_started=True)
-
-# --- pCloud Routes and Functions ---
-def download_from_pcloud(pcloud_path, filename, q):
-    """FIXED: Downloads a file from pCloud to the local server with progress."""
-    try:
-        while not q.empty(): q.get()
-        q.put({"stage": f"Downloading '{filename}' from pCloud...", "percent": 0})
-        pc = get_pcloud_client()
-        
-        link_data = pc.getfilelink(path=pcloud_path)
-        if not link_data or 'hosts' not in link_data or not link_data['hosts']:
-            raise Exception("pCloud API did not return a valid download host.")
-        download_url = "https://" + link_data['hosts'][0] + link_data['path']
-        q.put({"log": "Obtained direct download link from pCloud API."})
-        
-        local_path = os.path.join(DOWNLOAD_FOLDER, filename)
-        if os.path.exists(local_path):
-            q.put({"log": f"Overwriting existing local file '{filename}'."})
-        
-        with requests.get(download_url, stream=True) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get('content-length', 0))
-            downloaded_size = 0
-            with open(local_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    if total_size > 0:
-                        percent = (downloaded_size / total_size) * 100
-                        q.put({"stage": "Downloading from pCloud...", "percent": percent})
-
-        q.put({"stage": "✅ Download Complete!", "percent": 100})
-        q.put({"log": "File saved locally.", "pcloud_action_success": f"Downloaded '{filename}' successfully."})
-    except Exception as e:
-        q.put({"error": f"pCloud download failed: {str(e)}"})
-    finally:
-        q.put({"log": "DONE"})
-
-def download_and_upload_to_pixeldrain(pcloud_path, filename, q):
-    """FIXED: Downloads from pCloud, then uploads to Pixeldrain."""
-    local_path = os.path.join(DOWNLOAD_FOLDER, filename)
-    try:
-        while not q.empty(): q.get()
-        q.put({"stage": f"Step 1/2: Downloading '{filename}' from pCloud...", "percent": 0})
-        pc = get_pcloud_client()
-        
-        link_data = pc.getfilelink(path=pcloud_path)
-        if not link_data or 'hosts' not in link_data or not link_data['hosts']:
-            raise Exception("pCloud API did not return a valid download host.")
-        download_url = "https://" + link_data['hosts'][0] + link_data['path']
-
-        with requests.get(download_url, stream=True) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get('content-length', 0))
-            downloaded_size = 0
-            with open(local_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    if total_size > 0:
-                        percent = (downloaded_size / total_size) * 50
-                        q.put({"stage": "Step 1/2: Downloading from pCloud...", "percent": percent})
-
-        q.put({"stage": "Step 1/2: Download Complete!", "percent": 50})
-        upload_to_pixeldrain(local_path, filename, q)
-    except Exception as e:
-        q.put({"error": f"pCloud to Pixeldrain process failed: {str(e)}"})
-        q.put({"log": "DONE"})
-    finally:
-        if os.path.exists(local_path):
-            try: os.remove(local_path)
-            except OSError as e: q.put({"log": f"Warning: Could not clean up temp file: {e}"})
-
-def download_and_encode(pcloud_path, filename, q, encode_options):
-    """FIXED: Downloads from pCloud, then encodes the file."""
-    local_path = os.path.join(DOWNLOAD_FOLDER, filename)
-    try:
-        while not q.empty(): q.get()
-        q.put({"stage": f"Step 1/2: Downloading for encoding...", "percent": 0})
-        pc = get_pcloud_client()
-        
-        link_data = pc.getfilelink(path=pcloud_path)
-        if not link_data or 'hosts' not in link_data or not link_data['hosts']:
-            raise Exception("pCloud API did not return a valid download host.")
-        download_url = "https://" + link_data['hosts'][0] + link_data['path']
-        
-        with requests.get(download_url, stream=True) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get('content-length', 0))
-            downloaded_size = 0
-            with open(local_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    if total_size > 0:
-                        percent = (downloaded_size / total_size) * 50
-                        q.put({"stage": "Step 1/2: Downloading from pCloud...", "percent": percent})
-        
-        q.put({"stage": "Step 1/2: Download Complete!", "percent": 50})
-        encode_options['input_path'] = local_path
-        encode_file(**encode_options, q=q)
-    except Exception as e:
-        q.put({"error": f"pCloud encode process failed: {str(e)}"})
-        q.put({"log": "DONE"})
-    finally:
-         if os.path.exists(local_path):
-            try: os.remove(local_path)
-            except OSError as e: q.put({"log": f"Warning: Could not clean up temp file: {e}"})
-
-@app.route("/pcloud_files")
-def pcloud_files():
-    if 'last_pcloud_action_success' in session:
-        flash(f"✅ {session.pop('last_pcloud_action_success')}", "success")
-    if request.args.get('feedback'):
-        flash(f"✅ {request.args.get('feedback')}", "success")
-    try:
-        pc = get_pcloud_client()
-        folder_data = pc.listfolder(path=f'/{PCLOUD_FOLDER}')
-        items = [
-            {'name': item['name'], 'path': item['path'], 'size': human_size(item.get('size',0)), 'is_folder': item['isfolder'], 'is_media': is_media_file(item['name']), 'modified': item.get('modified','')}
-            for item in folder_data.get('metadata', {}).get('contents', [])
-        ]
-        pcloud_folder_url = f"https://my.pcloud.com/browser/folder?path={quote(f'/{PCLOUD_FOLDER}')}"
-        return render_template_string("""
-<!DOCTYPE html><html><head><title>pCloud Files</title><style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background-color:#f4f4f9;color:#333;margin:20px}
-.container{max-width:1000px;margin:auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1)}
-h1{color:#444}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:12px;text-align:left;border-bottom:1px solid #ddd;word-break:break-all}
-th{background-color:#f2f2f2}a{color:#007bff;text-decoration:none}a:hover{text-decoration:underline}
-.button-link,button{background-color:#007bff;color:#fff!important;padding:5px 10px;border:none;border-radius:4px;cursor:pointer;margin-right:5px;font-size:14px;text-decoration:none;display:inline-block}
-.button-link:hover,button:hover{background-color:#0056b3}.pcloud{background-color:#8E44AD}.pcloud:hover{background-color:#732d91}.delete{background-color:#dc3545}.delete:hover{background-color:#c82333}
-.rename{background-color:#ffc107;color:#212529!important}.rename:hover{background-color:#e0a800}.upload{background-color:#17a2b8}.upload:hover{background-color:#138496}
-.encode{background-color:#28a745}.encode:hover{background-color:#218838}.actions{white-space:nowrap}.flash-msg{padding:10px;border-radius:4px;margin-bottom:15px}
-.flash-success{background-color:#d4edda;color:#155724}.flash-error{background-color:#f8d7da;color:#721c24}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,.5)}
-.modal-content{background-color:#fff;margin:15% auto;padding:20px;border-radius:8px;width:500px;max-width:90%}.modal-content input{width:100%;padding:8px;margin:10px 0;box-sizing:border-box}
-</style></head><body><div class="container"><h1>pCloud Files: '/{{folder_name}}'</h1><p><a href="{{url_for('list_files')}}">← Local Files</a>
-<a href="{{pcloud_folder_url}}" target="_blank" class="button-link pcloud" style="margin-left:15px">↗️ Open on pCloud.com</a></p>
-{% with m=get_flashed_messages(with_categories=true)%}{%for c,msg in m%}<div class="flash-msg flash-{{c}}">{{msg|safe}}</div>{%endfor%}{%endwith%}
-{%if items%}<table><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead><tbody>
-{% for item in items %}<tr><td>{%if item.is_folder%}<b>📁 {{item.name}}</b>{%else%}📄 {{item.name}}{%endif%}</td><td>{{item.size}}</td><td>{{item.modified}}</td>
-<td class="actions">{%if not item.is_folder%}<form method="POST" action="{{url_for('pcloud_download_to_server')}}" style="display:inline"><input type="hidden" name="pcloud_path" value="{{item.path}}"><button type="submit">To Server</button></form>{%endif%}
-<button onclick="srm('{{item.path}}','{{item.name}}')" class="rename">Rename</button>{%if not item.is_folder%}
-<form method="POST" action="{{url_for('pcloud_upload_to_pixeldrain')}}" style="display:inline"><input type="hidden" name="pcloud_path" value="{{item.path}}"><button type="submit" class="upload">To Pixeldrain</button></form>
-{%if item.is_media%}<a href="{{url_for('pcloud_encode_page',pcloud_path=item.path)}}" class="button-link encode">Encode</a>{%endif%}{%endif%}
-<form method="POST" action="{{url_for('pcloud_delete')}}" style="display:inline"><input type="hidden" name="path" value="{{item.path}}"><button type="submit" class="delete" onclick="return confirm('Delete \'{{item.name}}\'?')">Delete</button></form></td></tr>
-{%endfor%}</tbody></table>{%else%}<p>No files in '/{{folder_name}}'.</p>{%endif%}</div>
-<div id="rm" class="modal"><div class="modal-content"><h3>Rename Item</h3><p>Current: <strong id="cn"></strong></p><label>New:</label><input type="text" id="nn"><button onclick="cr()">Rename</button><button onclick="crm()">Cancel</button></div></div>
-<script>let cp='';function srm(a,b){cp=a;document.getElementById('cn').textContent=a;document.getElementById('nn').value=b;document.getElementById('rm').style.display='block';document.getElementById('nn').focus()}
-function crm(){document.getElementById('rm').style.display='none'}
-function cr(){const a=document.getElementById('nn').value.trim();if(a){const b=document.createElement('form');b.method='POST';b.action='{{url_for("pcloud_rename")}}';const c=document.createElement('input');c.type='hidden';c.name='old_path';c.value=cp;const d=document.createElement('input');d.type='hidden';d.name='new_name';d.value=a;b.append(c,d);document.body.appendChild(b);b.submit()}crm()}
-window.onclick=e=>{if(e.target==document.getElementById('rm'))crm()};</script></body></html>
-""", items=items, folder_name=PCLOUD_FOLDER, pcloud_folder_url=pcloud_folder_url)
-    except Exception as e:
-        flash(f"Could not connect to pCloud: {str(e)}", "error")
+    file_path = os.path.join(DOWNLOAD_FOLDER, filepath)
+    if not os.path.exists(file_path):
+        flash("File not found.", "error")
         return redirect(url_for('list_files'))
-
-@app.route("/pcloud/delete", methods=["POST"])
-def pcloud_delete():
-    path = request.form.get("path")
-    if not path: flash("Path missing.", "error"); return redirect(url_for('pcloud_files'))
-    try:
-        pc = get_pcloud_client()
-        if path.endswith('/'): pc.deletefolderrecursive(path=path)
-        else: pc.deletefile(path=path)
-        session['last_pcloud_action_success'] = f"Deleted '{os.path.basename(path.strip('/'))}'."
-    except Exception as e:
-        flash(f"Error deleting: {str(e)}", "error")
-    return redirect(url_for('pcloud_files'))
-
-@app.route("/pcloud/rename", methods=["POST"])
-def pcloud_rename():
-    old_path, new_name = request.form.get("old_path"), request.form.get("new_name")
-    if not old_path or not new_name: flash("Missing names.", "error"); return redirect(url_for('pcloud_files'))
-    try:
-        pc = get_pcloud_client()
-        new_path = os.path.join(os.path.dirname(old_path), new_name)
-        pc.renamefile(frompath=old_path, topath=new_path)
-        session['last_pcloud_action_success'] = f"Renamed to '{new_name}'."
-    except Exception as e:
-        flash(f"Error renaming: {str(e)}", "error")
-    return redirect(url_for('pcloud_files'))
-
-@app.route("/pcloud/download_to_server", methods=["POST"])
-def pcloud_download_to_server():
-    pcloud_path = request.form.get("pcloud_path")
-    filename = os.path.basename(pcloud_path)
-    thread = threading.Thread(target=download_from_pcloud, args=(pcloud_path, filename, progress_queue))
+    
+    thread = threading.Thread(target=encode_file, args=(
+        file_path, request.form.get("output_filename"), request.form.get("codec"),
+        request.form.get("preset"), request.form.get("pass_mode"), request.form.get("bitrate"),
+        request.form.get("crf"), request.form.get("audio_bitrate"), request.form.get("fps"),
+        request.form.get("force_stereo") == "true", progress_queue,
+        request.form.get("upload_pixeldrain") == "true"
+    ))
     thread.daemon = True
     thread.start()
-    return render_template_string(FILE_OPERATION_TEMPLATE, operation_title=f"Downloading from pCloud: {filename}", download_started=True)
-
-@app.route("/pcloud/upload_to_pixeldrain", methods=["POST"])
-def pcloud_upload_to_pixeldrain():
-    pcloud_path, filename = request.form.get("pcloud_path"), os.path.basename(request.form.get("pcloud_path"))
-    thread = threading.Thread(target=download_and_upload_to_pixeldrain, args=(pcloud_path, filename, progress_queue))
-    thread.daemon = True
-    thread.start()
-    return render_template_string(FILE_OPERATION_TEMPLATE, operation_title=f"pCloud to Pixeldrain: {filename}", download_started=True)
-
-@app.route("/pcloud/encode/<path:pcloud_path>")
-def pcloud_encode_page(pcloud_path):
-    filename = os.path.basename(pcloud_path)
-    if not is_media_file(filename):
-        flash("Not a media file.", "error"); return redirect(url_for('pcloud_files'))
-    suggested_output = f"{os.path.splitext(filename)[0]}_encoded.mkv"
-    return render_template_string(ENCODE_TEMPLATE, filepath=f"pCloud file: {filename}", pcloud_path=pcloud_path, suggested_output=suggested_output, download_started=False)
-
-@app.route("/pcloud/encode/<path:pcloud_path>", methods=["POST"])
-def pcloud_encode_post(pcloud_path):
-    filename = os.path.basename(pcloud_path)
-    encode_options = {k: v for k, v in request.form.items() if k != 'pcloud_path'}
-    encode_options["upload_pixeldrain"] = "upload_pixeldrain" in request.form
-    encode_options["upload_pcloud"] = "upload_pcloud" in request.form
-    thread = threading.Thread(target=download_and_encode, args=(pcloud_path, filename, progress_queue, encode_options))
-    thread.daemon = True
-    thread.start()
-    return render_template_string(ENCODE_TEMPLATE, filepath=f"pCloud file: {filename}", pcloud_path=pcloud_path, suggested_output=request.form.get("output_filename"), download_started=True)
+    
+    return render_template_string(ENCODE_TEMPLATE, filepath=filepath,
+                                suggested_output=request.form.get("output_filename"),
+                                download_started=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=True)
